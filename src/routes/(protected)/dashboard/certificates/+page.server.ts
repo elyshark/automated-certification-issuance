@@ -25,12 +25,15 @@ export const load: PageServerLoad = async ({ locals }) => {
       issuedDate: certificate.issuedDate,
       expiryDate: certificate.expiryDate,
       employeeId: certificate.employeeId,
+      employeeGivenName: employee.givenName,
+      employeeSurname: employee.surname,
       trainingName: training.name,
       reviewerId: trainingHistory.reviewerId,
     })
     .from(certificate)
     .innerJoin(trainingHistory, eq(trainingHistory.certificateId, certificate.id))
-    .innerJoin(training, eq(trainingHistory.trainingCode, training.code));
+    .innerJoin(training, eq(trainingHistory.trainingCode, training.code))
+    .innerJoin(employee, eq(certificate.employeeId, employee.id));
 
   return {
     certificates: allCertificatesData,

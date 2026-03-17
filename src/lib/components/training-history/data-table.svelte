@@ -90,18 +90,23 @@
     type VisibilityState,
   } from "@tanstack/table-core";
   import { untrack, setContext } from "svelte";
+  import { CalendarDate, getLocalTimeZone, type DateValue } from "@internationalized/date";
   import { createSvelteTable } from "$lib/components/ui/data-table/data-table.svelte";
   import * as Tabs from "$lib/components/ui/tabs";
   import * as Table from "$lib/components/ui/table";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
+  import * as Drawer from "$lib/components/ui/drawer";
   import { Button } from "$lib/components/ui/button";
   import * as Select from "$lib/components/ui/select";
+  import { RangeCalendar } from "$lib/components/ui/range-calendar";
   import { Label } from "$lib/components/ui/label";
   import { Badge } from "$lib/components/ui/badge";
+  import { Input } from "$lib/components/ui/input";
   import { FlexRender } from "$lib/components/ui/data-table";
   import { resolve } from "$app/paths";
   import { toast } from "svelte-sonner";
   import TrainingRecordDrawer from "$lib/components/training-history/training-record-drawer.svelte";
+  import { IsMobile } from "$lib/hooks/is-mobile.svelte";
   import LayoutColumnsIcon from "@tabler/icons-svelte/icons/layout-columns";
   import ChevronDownIcon from "@tabler/icons-svelte/icons/chevron-down";
   import PlusIcon from "@tabler/icons-svelte/icons/plus";
@@ -113,6 +118,7 @@
   import CircleXIcon from "@tabler/icons-svelte/icons/circle-x";
   import LoaderIcon from "@tabler/icons-svelte/icons/loader";
   import TrashIcon from "@tabler/icons-svelte/icons/trash";
+  import FilterIcon from "@lucide/svelte/icons/list-filter";
 
   let {
     data,
@@ -143,8 +149,120 @@
 
   let view = $state("all");
 
-  const tableData = $derived(view === "all" ? data : data.filter((r) => r.status === view));
+  const isMobile = new IsMobile();
+
+  let filterDrawerOpen = $state(false);
+  type FilterState = {
+    id: string;
+    trainee: string;
+    training: string;
+    location: string;
+    status: string;
+    reviewer: string;
+    certId: string;
+    dateFrom: string;
+    dateTo: string;
+  };
+
+  let filters = $state<FilterState>({
+    id: "",
+    trainee: "",
+    training: "",
+    location: "",
+    status: "",
+    reviewer: "",
+    certId: "",
+    dateFrom: "",
+    dateTo: "",
+  });
+  let draftFilters = $state<FilterState>({
+    id: "",
+    trainee: "",
+    training: "",
+    location: "",
+    status: "",
+    reviewer: "",
+    certId: "",
+    dateFrom: "",
+    dateTo: "",
+  });
+
+  type DateRangeValue = {
+    start: DateValue | undefined;
+    end: DateValue | undefined;
+  };
+
+  let dateRange = $state<DateRangeValue>({ start: undefined, end: undefined });
+
+  const baseData = $derived(view === "all" ? data : data.filter((r) => r.status === view));
   const pendingCount = $derived(data.filter((r) => r.status === "PENDING").length);
+
+  const traineeOptions = $derived(
+    Array.from(new Set(data.map((row) => row.traineeName))).sort((a, b) => a.localeCompare(b)),
+  );
+  const trainingOptions = $derived(
+    Array.from(new Set(data.map((row) => row.trainingName))).sort((a, b) => a.localeCompare(b)),
+  );
+  const locationOptions = $derived(
+    Array.from(new Set(data.map((row) => row.location))).sort((a, b) => a.localeCompare(b)),
+  );
+  const reviewerOptions = $derived(
+    Array.from(new Set(data.map((row) => row.reviewer).filter(Boolean) as string[])).sort((a, b) =>
+      a.localeCompare(b),
+    ),
+  );
+  const statusOptions = ["PENDING", "APPROVED", "REJECTED"] as const;
+
+  const activeFilterCount = $derived(
+    [
+      filters.id ? 1 : 0,
+      filters.certId ? 1 : 0,
+      filters.dateFrom ? 1 : 0,
+      filters.dateTo ? 1 : 0,
+      filters.trainee ? 1 : 0,
+      filters.training ? 1 : 0,
+      filters.location ? 1 : 0,
+      filters.status ? 1 : 0,
+      filters.reviewer ? 1 : 0,
+    ].reduce((total, value) => total + value, 0),
+  );
+
+  function matchesIncludes(haystack: string, needle: string) {
+    return haystack.toLowerCase().includes(needle.toLowerCase());
+  }
+
+  function toCalendarDate(value: string) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return undefined;
+    return new CalendarDate(date.getFullYear(), date.getMonth() + 1, date.getDate());
+  }
+
+  function toIsoDate(value: DateValue) {
+    return value.toDate(getLocalTimeZone()).toISOString().slice(0, 10);
+  }
+
+  function applyFiltersToRows(rows: Schema[]) {
+    return rows.filter((row) => {
+      if (filters.id && !row.id.toString().includes(filters.id.trim())) return false;
+      if (filters.certId && !matchesIncludes(row.certificateId ?? "", filters.certId.trim())) {
+        return false;
+      }
+      if (filters.trainee && row.traineeName !== filters.trainee) return false;
+      if (filters.training && row.trainingName !== filters.training) {
+        return false;
+      }
+      if (filters.location && row.location !== filters.location) return false;
+      if (filters.reviewer && (row.reviewer ?? "") !== filters.reviewer) {
+        return false;
+      }
+      if (filters.status && row.status !== filters.status) return false;
+      if (filters.dateFrom && row.trainingDate < filters.dateFrom) return false;
+      if (filters.dateTo && row.trainingDate > filters.dateTo) return false;
+      return true;
+    });
+  }
+
+  const tableData = $derived(applyFiltersToRows(baseData));
 
   let pagination = $state<PaginationState>({ pageIndex: 0, pageSize: 10 });
   let sorting = $state<SortingState>([]);
@@ -255,6 +373,36 @@
 
   let viewLabel = $derived(views.find((v) => view === v.id)?.label ?? "Select a view");
 
+  function applyFilters() {
+    filters = { ...draftFilters };
+  }
+
+  function clearFilters() {
+    const cleared = {
+      id: "",
+      trainee: "",
+      training: "",
+      location: "",
+      status: "",
+      reviewer: "",
+      certId: "",
+      dateFrom: "",
+      dateTo: "",
+    };
+    filters = { ...cleared };
+    draftFilters = { ...cleared };
+    dateRange = { start: undefined, end: undefined };
+  }
+
+  $effect(() => {
+    if (!filterDrawerOpen) return;
+    draftFilters = { ...filters };
+    dateRange = {
+      start: filters.dateFrom ? toCalendarDate(filters.dateFrom) : undefined,
+      end: filters.dateTo ? toCalendarDate(filters.dateTo) : undefined,
+    };
+  });
+
   // ── Drawer state ──────────────────────────────────────────────────────────
   type DrawerPayload = {
     record: {
@@ -346,23 +494,32 @@
           </Tabs.Trigger>
         {/each}
       </Tabs.List>
-      <div class="flex items-center gap-2">
-        {#if hasSelection}
-          <Button variant="destructive" size="sm" onclick={() => (rowSelection = {})}>
-            <TrashIcon />
-            <span class="hidden lg:inline"
-              >Delete Selected ({Object.keys(rowSelection).length})</span
-            >
-            <span class="lg:hidden">Delete ({Object.keys(rowSelection).length})</span>
-          </Button>
-        {:else}
-          {@render ColumnsDropdown()}
-        {/if}
-        <Button variant="outline" size="sm" onclick={openCreate} disabled={createLoading}>
-          <PlusIcon />
-          <span class="hidden lg:inline">Add Training Record</span>
-          <span class="lg:hidden">Add</span>
+      <div class="flex flex-1 items-center justify-end gap-3">
+        <Button variant="outline" size="sm" onclick={() => (filterDrawerOpen = true)}>
+          <FilterIcon />
+          Filters
+          {#if activeFilterCount > 0}
+            <Badge variant="secondary">{activeFilterCount}</Badge>
+          {/if}
         </Button>
+        <div class="flex items-center gap-2">
+          {#if hasSelection}
+            <Button variant="destructive" size="sm" onclick={() => (rowSelection = {})}>
+              <TrashIcon />
+              <span class="hidden lg:inline"
+                >Delete Selected ({Object.keys(rowSelection).length})</span
+              >
+              <span class="lg:hidden">Delete ({Object.keys(rowSelection).length})</span>
+            </Button>
+          {:else}
+            {@render ColumnsDropdown()}
+          {/if}
+          <Button variant="outline" size="sm" onclick={openCreate} disabled={createLoading}>
+            <PlusIcon />
+            <span class="hidden lg:inline">Add Training Record</span>
+            <span class="lg:hidden">Add</span>
+          </Button>
+        </div>
       </div>
     </div>
 
@@ -373,6 +530,151 @@
     {/each}
   </Tabs.Root>
 {/if}
+
+<Drawer.Root bind:open={filterDrawerOpen} direction={isMobile.current ? "bottom" : "right"}>
+  <Drawer.Content>
+    <Drawer.Header class="gap-1">
+      <Drawer.Title>Filter Training History</Drawer.Title>
+      <Drawer.Description>Apply advanced filters to narrow results.</Drawer.Description>
+    </Drawer.Header>
+
+    <div class="flex flex-col gap-4 px-4">
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="flex flex-col gap-2">
+          <Label for="th-id">Record ID</Label>
+          <Input id="th-id" placeholder="e.g. 24" bind:value={draftFilters.id} />
+        </div>
+        <div class="flex flex-col gap-2">
+          <Label for="th-cert">Certificate ID</Label>
+          <Input id="th-cert" placeholder="e.g. II-KUL-001" bind:value={draftFilters.certId} />
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="flex flex-col gap-2">
+          <Label for="th-trainee">Trainee</Label>
+          <Select.Root type="single" bind:value={draftFilters.trainee}>
+            <Select.Trigger id="th-trainee" class="w-full">
+              <span class="truncate">{draftFilters.trainee || "All trainees"}</span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="">All trainees</Select.Item>
+              {#each traineeOptions as trainee (trainee)}
+                <Select.Item value={trainee}>{trainee}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+        <div class="flex flex-col gap-2">
+          <Label for="th-training">Training</Label>
+          <Select.Root type="single" bind:value={draftFilters.training}>
+            <Select.Trigger id="th-training" class="w-full">
+              <span class="truncate">{draftFilters.training || "All trainings"}</span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="">All trainings</Select.Item>
+              {#each trainingOptions as training (training)}
+                <Select.Item value={training}>{training}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="flex flex-col gap-2">
+          <Label for="th-location">Training Location</Label>
+          <Select.Root type="single" bind:value={draftFilters.location}>
+            <Select.Trigger id="th-location" class="w-full">
+              <span class="truncate">{draftFilters.location || "All locations"}</span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="">All locations</Select.Item>
+              {#each locationOptions as location (location)}
+                <Select.Item value={location}>{location}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+        <div class="flex flex-col gap-2">
+          <Label for="th-status">Status</Label>
+          <Select.Root type="single" bind:value={draftFilters.status}>
+            <Select.Trigger id="th-status" class="w-full">
+              <span class="truncate">{draftFilters.status || "All statuses"}</span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="">All statuses</Select.Item>
+              {#each statusOptions as status (status)}
+                <Select.Item value={status}>{status}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="flex flex-col gap-2">
+          <Label for="th-reviewer">Reviewer</Label>
+          <Select.Root type="single" bind:value={draftFilters.reviewer}>
+            <Select.Trigger id="th-reviewer" class="w-full">
+              <span class="truncate">{draftFilters.reviewer || "All reviewers"}</span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="">All reviewers</Select.Item>
+              {#each reviewerOptions as reviewer (reviewer)}
+                <Select.Item value={reviewer}>{reviewer}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+        <div class="flex flex-col gap-2 sm:col-span-2">
+          <div class="flex items-center justify-between gap-2">
+            <Label for="th-date-range">Training Date Range</Label>
+            <Button
+              variant="link"
+              size="sm"
+              disabled={!dateRange.start && !dateRange.end}
+              onclick={() => {
+                dateRange = { start: undefined, end: undefined };
+                draftFilters = { ...draftFilters, dateFrom: "", dateTo: "" };
+              }}
+            >
+              Clear range
+            </Button>
+          </div>
+          <div id="th-date-range" class="rounded-md border p-2">
+            <RangeCalendar
+              value={dateRange}
+              onValueChange={(value) => {
+                const next = value ?? { start: undefined, end: undefined };
+                dateRange = next;
+                draftFilters = {
+                  ...draftFilters,
+                  dateFrom: next.start ? toIsoDate(next.start) : "",
+                  dateTo: next.end ? toIsoDate(next.end) : "",
+                };
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <Drawer.Footer class="px-4 pt-2 pb-4">
+      <div class="flex items-center justify-between">
+        <Button variant="outline" onclick={clearFilters}>Clear filters</Button>
+        <Button
+          onclick={() => {
+            applyFilters();
+            filterDrawerOpen = false;
+          }}
+        >
+          Apply filters
+        </Button>
+      </div>
+    </Drawer.Footer>
+  </Drawer.Content>
+</Drawer.Root>
 
 {#snippet ColumnsDropdown()}
   <DropdownMenu.Root>

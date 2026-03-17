@@ -1,9 +1,17 @@
 <script lang="ts">
   import * as Tabs from "$lib/components/ui/tabs";
   import * as Card from "$lib/components/ui/card";
+  import * as Drawer from "$lib/components/ui/drawer";
+  import { Button } from "$lib/components/ui/button";
+  import { Input } from "$lib/components/ui/input";
+  import { Label } from "$lib/components/ui/label";
+  import * as Select from "$lib/components/ui/select";
   import { PDFViewer } from "@embedpdf/svelte-pdf-viewer";
   import { SvelteDate } from "svelte/reactivity";
   import { mode } from "mode-watcher";
+  import { IsMobile } from "$lib/hooks/is-mobile.svelte";
+
+  import FilterIcon from "@lucide/svelte/icons/list-filter";
 
   const { data } = $props();
 
@@ -14,6 +22,28 @@
   const canViewAll = $derived(role === "ADMINISTRATOR");
 
   let activeTab = $state("my-certificates");
+  const isMobile = new IsMobile();
+  let filterDrawerOpen = $state(false);
+
+  type FilterState = {
+    certId: string;
+    training: string;
+    status: string;
+    employee: string;
+  };
+
+  let filters = $state<FilterState>({
+    certId: "",
+    training: "",
+    status: "",
+    employee: "",
+  });
+  let draftFilters = $state<FilterState>({
+    certId: "",
+    training: "",
+    status: "",
+    employee: "",
+  });
 
   const pdfTheme = {
     preference: mode.current || "system",
@@ -111,29 +141,118 @@
     },
   };
 
+  const trainingOptions = $derived(
+    Array.from(new Set(data.certificates.map((cert) => cert.trainingName))).sort((a, b) =>
+      a.localeCompare(b),
+    ),
+  );
+  const employeeOptions = $derived(
+    Array.from(
+      new Set(
+        data.certificates.map((cert) =>
+          `${cert.employeeGivenName ?? ""} ${cert.employeeSurname ?? ""}`.trim(),
+        ),
+      ),
+    )
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b)),
+  );
+  const statusOptions = ["valid", "expiring", "expired"] as const;
+
+  const activeFilterCount = $derived(
+    [
+      filters.certId ? 1 : 0,
+      filters.training ? 1 : 0,
+      filters.status ? 1 : 0,
+      filters.employee ? 1 : 0,
+    ].reduce((total, value) => total + value, 0),
+  );
+
+  function formatEmployeeName(cert: (typeof data.certificates)[0]) {
+    return `${cert.employeeGivenName ?? ""} ${cert.employeeSurname ?? ""}`.trim();
+  }
+
+  function applyFilters() {
+    filters = { ...draftFilters };
+  }
+
+  function clearFilters() {
+    const cleared = {
+      certId: "",
+      training: "",
+      status: "",
+      employee: "",
+    };
+    filters = { ...cleared };
+    draftFilters = { ...cleared };
+  }
+
+  $effect(() => {
+    if (!filterDrawerOpen) return;
+    draftFilters = { ...filters };
+  });
+
+  function getCertStatus(
+    cert: (typeof data.certificates)[0],
+    now: SvelteDate,
+    in90Days: SvelteDate,
+  ) {
+    if (!cert.expiryDate || cert.expiryDate > in90Days) return "valid";
+    if (cert.expiryDate >= now) return "expiring";
+    return "expired";
+  }
+
   // Helper to categorize certs
   function categorizeCerts(certs: typeof data.certificates) {
     const now = new SvelteDate();
     const IN_90_DAYS = new SvelteDate(now.getTime());
     IN_90_DAYS.setDate(now.getDate() + 90);
 
-    const valid = certs.filter((c) => !c.expiryDate || c.expiryDate > IN_90_DAYS);
-    const expiringSoon = certs.filter(
-      (c) => c.expiryDate && c.expiryDate <= IN_90_DAYS && c.expiryDate >= now,
-    );
-    const expired = certs.filter((c) => c.expiryDate && c.expiryDate < now);
+    const valid: typeof certs = [];
+    const expiringSoon: typeof certs = [];
+    const expired: typeof certs = [];
+
+    for (const cert of certs) {
+      const status = getCertStatus(cert, now, IN_90_DAYS);
+      if (status === "valid") valid.push(cert);
+      else if (status === "expiring") expiringSoon.push(cert);
+      else expired.push(cert);
+    }
 
     return { valid, expiringSoon, expired };
   }
 
+  function filterCerts(certs: typeof data.certificates) {
+    const now = new SvelteDate();
+    const IN_90_DAYS = new SvelteDate(now.getTime());
+    IN_90_DAYS.setDate(now.getDate() + 90);
+
+    return certs.filter((cert) => {
+      if (filters.certId && !cert.id.toLowerCase().includes(filters.certId.trim().toLowerCase())) {
+        return false;
+      }
+      if (filters.training && cert.trainingName !== filters.training) {
+        return false;
+      }
+      if (filters.employee && formatEmployeeName(cert) !== filters.employee) {
+        return false;
+      }
+      if (filters.status) {
+        const status = getCertStatus(cert, now, IN_90_DAYS);
+        if (status !== filters.status) return false;
+      }
+      return true;
+    });
+  }
+
   // Filter lists based on role requirements
   const myCertificates = $derived(
-    categorizeCerts(data.certificates.filter((c) => c.employeeId === employeeId)),
+    categorizeCerts(filterCerts(data.certificates.filter((c) => c.employeeId === employeeId))),
   );
   const approvedCertificates = $derived(
-    categorizeCerts(data.certificates.filter((c) => c.reviewerId === employeeId)),
+    categorizeCerts(filterCerts(data.certificates.filter((c) => c.reviewerId === employeeId))),
   );
-  const allCertificates = $derived(categorizeCerts(data.certificates));
+  const allCertificates = $derived(categorizeCerts(filterCerts(data.certificates)));
 
   // URL formatting
   function getPdfUrl(certPath: string, certId: string) {
@@ -156,14 +275,101 @@
     <p class="mt-2 text-muted-foreground">View your certification records.</p>
   </div>
 
+  <Drawer.Root bind:open={filterDrawerOpen} direction={isMobile.current ? "bottom" : "right"}>
+    <Drawer.Content>
+      <Drawer.Header class="gap-1">
+        <Drawer.Title>Filter Certificates</Drawer.Title>
+        <Drawer.Description>Refine certificates by ID, status, or issuer.</Drawer.Description>
+      </Drawer.Header>
+
+      <div class="flex flex-col gap-4 px-4">
+        <div class="flex flex-col gap-2">
+          <Label for="cert-id">Certificate ID</Label>
+          <Input id="cert-id" placeholder="e.g. II-KUL-001" bind:value={draftFilters.certId} />
+        </div>
+
+        <div class="flex flex-col gap-2">
+          <Label for="cert-training">Training</Label>
+          <Select.Root type="single" bind:value={draftFilters.training}>
+            <Select.Trigger id="cert-training" class="w-full">
+              <span class="truncate">{draftFilters.training || "All trainings"}</span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="">All trainings</Select.Item>
+              {#each trainingOptions as training (training)}
+                <Select.Item value={training}>{training}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+
+        <div class="flex flex-col gap-2">
+          <Label for="cert-status">Status</Label>
+          <Select.Root type="single" bind:value={draftFilters.status}>
+            <Select.Trigger id="cert-status" class="w-full">
+              <span class="truncate">{draftFilters.status || "All statuses"}</span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="">All statuses</Select.Item>
+              {#each statusOptions as status (status)}
+                <Select.Item value={status}>{status}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+
+        <div class="flex flex-col gap-2">
+          <Label for="cert-employee">Issued To</Label>
+          <Select.Root type="single" bind:value={draftFilters.employee}>
+            <Select.Trigger id="cert-employee" class="w-full">
+              <span class="truncate">{draftFilters.employee || "All employees"}</span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="">All employees</Select.Item>
+              {#each employeeOptions as employee (employee)}
+                <Select.Item value={employee}>{employee}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+      </div>
+
+      <Drawer.Footer class="px-4 pt-2 pb-4">
+        <div class="flex items-center justify-between">
+          <Button variant="outline" onclick={clearFilters}>Clear filters</Button>
+          <Button
+            onclick={() => {
+              applyFilters();
+              filterDrawerOpen = false;
+            }}
+          >
+            Apply filters
+          </Button>
+        </div>
+      </Drawer.Footer>
+    </Drawer.Content>
+  </Drawer.Root>
+
   <Tabs.Root bind:value={activeTab} class="w-full">
-    <Tabs.List class="justify-start overflow-x-auto">
-      <Tabs.Trigger value="my-certificates">My Certificates</Tabs.Trigger>
-      <Tabs.Trigger value="approved-certificates" disabled={!canViewApproved}>
-        Approved Certificates
-      </Tabs.Trigger>
-      <Tabs.Trigger value="all-certificates" disabled={!canViewAll}>All Certificates</Tabs.Trigger>
-    </Tabs.List>
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <Tabs.List class="justify-start overflow-x-auto">
+        <Tabs.Trigger value="my-certificates">My Certificates</Tabs.Trigger>
+        <Tabs.Trigger value="approved-certificates" disabled={!canViewApproved}>
+          Approved Certificates
+        </Tabs.Trigger>
+        <Tabs.Trigger value="all-certificates" disabled={!canViewAll}>All Certificates</Tabs.Trigger
+        >
+      </Tabs.List>
+      <Button variant="outline" size="sm" onclick={() => (filterDrawerOpen = true)}>
+        <FilterIcon />
+        Filters
+        {#if activeFilterCount > 0}
+          <span class="ms-2 inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs">
+            {activeFilterCount}
+          </span>
+        {/if}
+      </Button>
+    </div>
 
     <Tabs.Content value="my-certificates" class="mt-6 space-y-10">
       {@render certificateGroup("Valid", myCertificates.valid, "my-certificates")}
