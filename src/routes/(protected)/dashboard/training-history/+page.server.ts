@@ -1,11 +1,21 @@
 import { db } from "$lib/server/db";
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq, inArray, or } from "drizzle-orm";
 import { certificate, employee, trainingHistory } from "$lib/server/db/schema";
 import { fail, redirect } from "@sveltejs/kit";
 import * as v from "valibot";
 import { uploadToR2 } from "$lib/server/r2";
 import { triggerApprovalFlow } from "$lib/server/power-automate";
+import { getReviewerAllowedLocationCodes } from "$lib/server/permissions";
 import type { Actions, PageServerLoad } from "./$types";
+
+const isAdministratorReviewer = async (reviewerId: number) => {
+  const reviewer = await db.query.employee.findFirst({
+    columns: { role: true },
+    where: eq(employee.id, reviewerId),
+  });
+
+  return reviewer?.role === "ADMINISTRATOR";
+};
 
 export const load: PageServerLoad = async ({ locals }) => {
   // Get the current employee's role to scope the query
@@ -18,11 +28,29 @@ export const load: PageServerLoad = async ({ locals }) => {
   const role = currentEmployee?.role ?? "USER";
   const currentId = currentEmployee?.id;
 
+  const allowedLocations =
+    role === "REVIEWER" && currentId ? await getReviewerAllowedLocationCodes(currentId) : [];
+
+  const reviewerWhere =
+    role === "REVIEWER"
+      ? (() => {
+          const own = currentId ? eq(trainingHistory.traineeId, currentId) : undefined;
+          const allowed = allowedLocations.length
+            ? inArray(trainingHistory.locationCode, allowedLocations)
+            : undefined;
+          if (own && allowed) return or(own, allowed);
+          return own ?? allowed;
+        })()
+      : undefined;
+
   const [rows, reviewers] = await Promise.all([
     db.query.trainingHistory.findMany({
       orderBy: [desc(trainingHistory.trainingDate)],
-      // USER sees only their own rows; REVIEWER and ADMINISTRATOR see all
-      ...(role === "USER" && currentId ? { where: eq(trainingHistory.traineeId, currentId) } : {}),
+      ...(role === "USER" && currentId
+        ? { where: eq(trainingHistory.traineeId, currentId) }
+        : role === "REVIEWER" && reviewerWhere
+          ? { where: reviewerWhere }
+          : {}),
       with: {
         trainee: true,
         reviewer: true,
@@ -30,11 +58,11 @@ export const load: PageServerLoad = async ({ locals }) => {
         location: true,
       },
     }),
-    // Reviewers dropdown: REVIEWER and ADMINISTRATOR roles
+    // Reviewers dropdown: ADMINISTRATOR roles only
     db
       .select({ id: employee.id, givenName: employee.givenName, surname: employee.surname })
       .from(employee)
-      .where(inArray(employee.role, ["REVIEWER", "ADMINISTRATOR"])),
+      .where(inArray(employee.role, ["ADMINISTRATOR"])),
   ]);
 
   return {
@@ -115,6 +143,10 @@ export const actions: Actions = {
       const rid = Number(d.reviewerId);
       // REVIEWER cannot assign themselves
       finalReviewerId = rid !== currentEmployee.id ? rid : null;
+    }
+
+    if (finalReviewerId && !(await isAdministratorReviewer(finalReviewerId))) {
+      return fail(400, { error: "Reviewer must be an administrator" });
     }
 
     const [newRecord] = await db
@@ -221,6 +253,10 @@ export const actions: Actions = {
     // REVIEWER cannot assign themselves
     if (role === "REVIEWER" && reviewerId === currentEmployee.id) {
       return fail(400, { error: "Cannot assign yourself as reviewer" });
+    }
+
+    if (!(await isAdministratorReviewer(reviewerId))) {
+      return fail(400, { error: "Reviewer must be an administrator" });
     }
 
     // Update the reviewer

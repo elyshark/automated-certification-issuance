@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { error, fail, redirect } from "@sveltejs/kit";
 import * as v from "valibot";
 import { uploadToR2 } from "$lib/server/r2";
+import { getReviewerAllowedLocationCodes } from "$lib/server/permissions";
 import type { Actions, PageServerLoad } from "./$types";
 
 export const load: PageServerLoad = async ({ params, locals }) => {
@@ -23,7 +24,12 @@ export const load: PageServerLoad = async ({ params, locals }) => {
       with: { trainee: true, reviewer: true, training: true, location: true, certificate: true },
     }),
     db
-      .select({ id: employee.id, givenName: employee.givenName, surname: employee.surname })
+      .select({
+        id: employee.id,
+        givenName: employee.givenName,
+        surname: employee.surname,
+        role: employee.role,
+      })
       .from(employee),
     db.select({ code: training.code, name: training.name }).from(training),
     db.select({ code: location.code, name: location.name }).from(location),
@@ -34,6 +40,15 @@ export const load: PageServerLoad = async ({ params, locals }) => {
   // USER can only view their own record
   if (role === "USER" && record.traineeId !== currentId) {
     throw error(403, "You can only view your own training records");
+  }
+
+  if (role === "REVIEWER") {
+    const allowedLocations = currentId ? await getReviewerAllowedLocationCodes(currentId) : [];
+    const canViewByLocation = allowedLocations.includes(record.locationCode);
+    const canViewOwn = currentId === record.traineeId;
+    if (!canViewByLocation && !canViewOwn) {
+      throw error(403, "You do not have access to this training record");
+    }
   }
 
   return {
@@ -48,7 +63,11 @@ export const load: PageServerLoad = async ({ params, locals }) => {
       remarks: record.remarks ?? null,
       certificateId: record.certificateId ?? null,
     },
-    employees: employees.map((e) => ({ id: e.id, name: `${e.givenName} ${e.surname}` })),
+    employees: employees.map((e) => ({
+      id: e.id,
+      name: `${e.givenName} ${e.surname}`,
+      role: e.role as "USER" | "REVIEWER" | "ADMINISTRATOR",
+    })),
     trainings,
     locations,
     role,
@@ -78,7 +97,7 @@ export const actions: Actions = {
     });
 
     const role = currentEmployee?.role ?? "USER";
-    if (role === "USER") return fail(403, { error: "Forbidden" });
+    if (role !== "ADMINISTRATOR") return fail(403, { error: "Forbidden" });
 
     const id = Number(params.id);
     const record = await db.query.trainingHistory.findFirst({
@@ -86,21 +105,10 @@ export const actions: Actions = {
     });
     if (!record) return fail(404, { error: "Record not found" });
 
-    // REVIEWER can only edit records that are unassigned or assigned to them
-    if (
-      role === "REVIEWER" &&
-      record.reviewerId !== null &&
-      record.reviewerId !== currentEmployee?.id
-    ) {
-      return fail(403, {
-        error: "You can only edit unassigned records or records assigned to you",
-      });
-    }
-
     const formData = await request.formData();
     const certFile = formData.get("certificate") as File | null;
 
-    // Only REVIEWER and ADMINISTRATOR can upload a certificate
+    // Only ADMINISTRATOR can upload a certificate
     let certId: string | undefined;
     if (certFile && certFile.size > 0) {
       certId = `C${String(id).padStart(4, "0")}${Date.now().toString(36).toUpperCase().slice(-7)}`;
@@ -117,42 +125,45 @@ export const actions: Actions = {
       });
     }
 
-    if (role === "ADMINISTRATOR" || role === "REVIEWER") {
-      const result = v.safeParse(adminSchema, {
-        traineeId: formData.get("traineeId"),
-        reviewerId: formData.get("reviewerId") || undefined,
-        trainingCode: formData.get("trainingCode"),
-        locationCode: formData.get("locationCode"),
-        status: formData.get("status"),
-        trainingDate: formData.get("trainingDate"),
-        remarks: formData.get("remarks") || undefined,
-      });
-      if (!result.success) {
-        return fail(400, { errors: v.flatten(result.issues).nested });
-      }
-      const d = result.output;
-
-      // REVIEWER cannot assign themselves as reviewer
-      let finalReviewerId = d.reviewerId ? Number(d.reviewerId) : null;
-      if (role === "REVIEWER" && finalReviewerId === currentEmployee?.id) {
-        finalReviewerId = null;
-      }
-
-      await db
-        .update(trainingHistory)
-        .set({
-          traineeId: Number(d.traineeId),
-          reviewerId: finalReviewerId,
-          trainingCode: d.trainingCode,
-          locationCode: d.locationCode,
-          status: d.status,
-          trainingDate: new Date(d.trainingDate),
-          remarks: d.remarks ?? null,
-          reviewedDate: d.status !== "PENDING" ? new Date() : null,
-          ...(certId ? { certificateId: certId } : {}),
-        })
-        .where(eq(trainingHistory.id, id));
+    const result = v.safeParse(adminSchema, {
+      traineeId: formData.get("traineeId"),
+      reviewerId: formData.get("reviewerId") || undefined,
+      trainingCode: formData.get("trainingCode"),
+      locationCode: formData.get("locationCode"),
+      status: formData.get("status"),
+      trainingDate: formData.get("trainingDate"),
+      remarks: formData.get("remarks") || undefined,
+    });
+    if (!result.success) {
+      return fail(400, { errors: v.flatten(result.issues).nested });
     }
+    const d = result.output;
+
+    const nextReviewerId = d.reviewerId ? Number(d.reviewerId) : null;
+    if (nextReviewerId) {
+      const reviewer = await db.query.employee.findFirst({
+        columns: { role: true },
+        where: eq(employee.id, nextReviewerId),
+      });
+      if (reviewer?.role !== "ADMINISTRATOR") {
+        return fail(400, { error: "Reviewer must be an administrator" });
+      }
+    }
+
+    await db
+      .update(trainingHistory)
+      .set({
+        traineeId: Number(d.traineeId),
+        reviewerId: nextReviewerId,
+        trainingCode: d.trainingCode,
+        locationCode: d.locationCode,
+        status: d.status,
+        trainingDate: new Date(d.trainingDate),
+        remarks: d.remarks ?? null,
+        reviewedDate: d.status !== "PENDING" ? new Date() : null,
+        ...(certId ? { certificateId: certId } : {}),
+      })
+      .where(eq(trainingHistory.id, id));
 
     return { success: true };
   },

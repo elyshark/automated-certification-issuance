@@ -18,8 +18,9 @@
   const role = $derived(data.employee?.role || "USER");
   const employeeId = $derived(data.employee?.id);
 
-  const canViewApproved = $derived(role === "REVIEWER" || role === "ADMINISTRATOR");
+  const canViewApproved = $derived(role === "ADMINISTRATOR");
   const canViewAll = $derived(role === "ADMINISTRATOR");
+  const isReviewer = $derived(role === "REVIEWER");
 
   let activeTab = $state("my-certificates");
   const isMobile = new IsMobile();
@@ -247,7 +248,13 @@
 
   // Filter lists based on role requirements
   const myCertificates = $derived(
-    categorizeCerts(filterCerts(data.certificates.filter((c) => c.employeeId === employeeId))),
+    categorizeCerts(
+      filterCerts(
+        isReviewer
+          ? data.certificates
+          : data.certificates.filter((c) => c.employeeId === employeeId),
+      ),
+    ),
   );
   const approvedCertificates = $derived(
     categorizeCerts(filterCerts(data.certificates.filter((c) => c.reviewerId === employeeId))),
@@ -272,7 +279,11 @@
 <div class="@container/main flex flex-col space-y-6 p-4 md:p-6">
   <div>
     <h1 class="text-3xl font-bold tracking-tight">Certificates</h1>
-    <p class="mt-2 text-muted-foreground">View your certification records.</p>
+    <p class="mt-2 text-muted-foreground">
+      {isReviewer
+        ? "View certificates for your approved locations."
+        : "View your certification records."}
+    </p>
   </div>
 
   <Drawer.Root bind:open={filterDrawerOpen} direction={isMobile.current ? "bottom" : "right"}>
@@ -353,7 +364,9 @@
   <Tabs.Root bind:value={activeTab} class="w-full">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <Tabs.List class="justify-start overflow-x-auto">
-        <Tabs.Trigger value="my-certificates">My Certificates</Tabs.Trigger>
+        <Tabs.Trigger value="my-certificates">
+          {isReviewer ? "Location Certificates" : "My Certificates"}
+        </Tabs.Trigger>
         <Tabs.Trigger value="approved-certificates" disabled={!canViewApproved}>
           Approved Certificates
         </Tabs.Trigger>

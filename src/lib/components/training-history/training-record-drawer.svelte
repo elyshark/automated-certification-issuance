@@ -50,7 +50,7 @@
     open: boolean;
     record?: RecordData | null;
     renewedFromId?: number | null;
-    employees: { id: number; name: string }[];
+    employees: { id: number; name: string; role: "USER" | "REVIEWER" | "ADMINISTRATOR" }[];
     trainings: { code: string; name: string }[];
     locations: { code: string; name: string }[];
     role: "USER" | "REVIEWER" | "ADMINISTRATOR";
@@ -61,18 +61,10 @@
   const isCreate = $derived(record == null);
   /** USER or REVIEWER creating a new record for themselves — simplified form */
   const selfCreateMode = $derived(isCreate && (role === "USER" || role === "REVIEWER"));
-  /** In edit mode, REVIEWER can edit if reviewer is unassigned or is themselves */
-  const reviewerCanEdit = $derived(
-    role === "REVIEWER" &&
-      !isCreate &&
-      (record?.reviewerId === null || record?.reviewerId === currentEmployeeId),
-  );
-  const canEditAll = $derived(isCreate || role === "ADMINISTRATOR" || reviewerCanEdit);
-  const canEditReview = $derived(isCreate || role === "ADMINISTRATOR" || reviewerCanEdit);
-  /** Employees eligible as reviewers (exclude self for REVIEWER role) */
-  const reviewerCandidates = $derived(
-    role === "REVIEWER" ? employees.filter((e) => e.id !== currentEmployeeId) : employees,
-  );
+  const canEditAll = $derived(isCreate || role === "ADMINISTRATOR");
+  const canEditReview = $derived(role === "ADMINISTRATOR");
+  /** Employees eligible as reviewers (ADMINISTRATOR only) */
+  const reviewerCandidates = $derived(employees.filter((e) => e.role === "ADMINISTRATOR"));
 
   // ── Editable state ────────────────────────────────────────────────────────
   let traineeId = $state(untrack(() => record?.traineeId ?? currentEmployeeId));
@@ -471,7 +463,11 @@
     </div>
 
     <Drawer.Footer>
-      <Button type="submit" form={formId} disabled={loading || (!isCreate && role === "USER")}>
+      <Button
+        type="submit"
+        form={formId}
+        disabled={loading || (!isCreate && role !== "ADMINISTRATOR")}
+      >
         {#if loading}
           <Spinner />
         {/if}
