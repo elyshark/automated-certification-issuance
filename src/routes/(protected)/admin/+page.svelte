@@ -5,34 +5,24 @@
   import AreaChart from "$lib/components/admin/area-chart.svelte";
   import DonutChart from "$lib/components/admin/donut-chart.svelte";
   import DataTable from "$lib/components/training-history/data-table.svelte";
+  import { calculateCompliance } from "$lib/compliance";
 
   let { data }: { data: PageData } = $props();
 
-  const totalPersonnel = $derived(data.allEmployees.length);
+  const complianceStats = $derived.by(() =>
+    calculateCompliance({
+      employees: data.allEmployees,
+      trainingHistory: data.allTrainingHistory,
+    }),
+  );
+
+  const totalPersonnel = $derived(complianceStats.totalPersonnel);
   const totalTerminals = $derived(data.allLocations.length);
   const pendingActions = $derived(
     data.allTrainingHistory.filter((th) => th.status === "PENDING").length,
   );
 
-  const overallCompliance = $derived.by(() => {
-    const now = new Date();
-    const employeesWithValidCerts: Record<number, boolean> = {};
-
-    for (const cert of data.allCertificates) {
-      if (cert.expiryDate) {
-        const expiryDate = new Date(cert.expiryDate);
-        if (!isNaN(expiryDate.getTime()) && expiryDate >= now) {
-          employeesWithValidCerts[cert.employeeId] = true;
-        }
-      }
-    }
-
-    if (totalPersonnel === 0) return 0;
-
-    const validCount = Object.keys(employeesWithValidCerts).length;
-    const compliancePercentage = Math.round((validCount / totalPersonnel) * 100);
-    return compliancePercentage;
-  });
+  const overallCompliance = $derived(complianceStats.compliancePercentage);
 
   const locationStats = $derived.by(() => {
     const stats: Record<string, { locationCode: string; locationName: string; approved: number }> =

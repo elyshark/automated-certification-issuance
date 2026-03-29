@@ -38,6 +38,7 @@ export const load: PageServerLoad = async ({ locals }) => {
         with: {
           certificate: true,
           location: true,
+          training: true,
         },
       }),
       db.select().from(certificate),
